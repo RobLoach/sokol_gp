@@ -97,7 +97,7 @@ typedef struct sgp_mat3 {
 } sgp_mat3;
 
 typedef struct sgp_color {
-    float r, g, b, a;
+    uint8_t r, g, b, a;
 } sgp_color;
 
 typedef struct sgp_desc {
@@ -117,8 +117,8 @@ typedef struct sgp_state {
     sgp_mat3 proj;
     sgp_mat3 transform;
     sgp_mat3 mvp;
-    sgp_color color;
     sgp_uniform uniform;
+    sgp_color color;
     sgp_blend_mode blend_mode;
     sg_pipeline pipeline;
     uint32_t _base_vertex;
@@ -230,15 +230,17 @@ SOKOL_API_DECL sgp_desc sgp_query_desc();
 #endif
 
 enum {
-    _SGP_INIT_COOKIE = 0xCAFED0D,
+    _SGP_INIT_COOKIE = 0xCAFED00D,
     _SGP_DEFAULT_MAX_VERTICES = 65536,
     _SGP_DEFAULT_MAX_COMMANDS = 16384,
     _SGP_MAX_STACK_DEPTH = 64,
+    _SGP_IMPOSSIBLE_ID = 0xFFFFFFFFU
 };
 
 typedef struct _sgp_vertex {
     sgp_vec2 position;
     sgp_vec2 texcoord;
+    sgp_color color;
 } _sgp_vertex;
 
 typedef struct _sgp_region {
@@ -323,16 +325,19 @@ static void _sgp_set_error(sgp_error code, const char *message) {
 static const char* _sgp_vs_source =
 "#version 330\n"
 "layout(location=0) in vec4 coord;\n"
+"layout(location=1) in vec4 color;\n"
 "out vec2 fragUV;\n"
+"out vec4 iColor;\n"
 "void main() {\n"
 "    gl_Position = vec4(coord.xy, 0.0, 1.0);\n"
 "    fragUV = coord.zw;\n"
+"    iColor = color;\n"
 "}\n";
 static const char* _sgp_fs_source =
 "#version 330\n"
 "uniform sampler2D iChannel0;\n"
-"uniform vec4 iColor;\n"
 "in vec2 fragUV;\n"
+"in vec4 iColor;\n"
 "out vec4 fragColor;\n"
 "void main() {\n"
 "    fragColor = texture(iChannel0, fragUV) * iColor;\n"
@@ -652,6 +657,7 @@ static sg_pipeline _sgp_make_pipeline(sg_primitive_type primitive_type, sgp_blen
             },
             .attrs = {
                 {.offset=0, .format=SG_VERTEXFORMAT_FLOAT4},
+                {.offset=offsetof(_sgp_vertex, color), .format=SG_VERTEXFORMAT_UBYTE4N },
             },
         },
         .shader = shader,
@@ -680,6 +686,7 @@ static sg_shader _sgp_make_shader(const sg_shader_stage_desc* vs, const sg_shade
     sg_shader_desc shader_desc = {
         .attrs = {
             {.name="coord", .sem_name="POSITION", .sem_index=0},
+            {.name="color", .sem_name="TEXCOORD", .sem_index=1},
         },
         .vs = {
 #ifdef _SGP_BYTECODE
@@ -696,10 +703,6 @@ static sg_shader _sgp_make_shader(const sg_shader_stage_desc* vs, const sg_shade
 #else
             .source = _sgp_fs_source,
 #endif
-            .uniform_blocks = {{
-                .size = sizeof(sgp_color),
-                .uniforms = {{.name="iColor", .type=SG_UNIFORMTYPE_FLOAT4}},
-            }},
             .images = {{.name = "iChannel0", .type=SG_IMAGETYPE_2D}},
         }
     };
@@ -883,8 +886,8 @@ void sgp_begin(int width, int height) {
     _sgp.state.proj = _sgp_default_proj(width, height);
     _sgp.state.transform = _sgp_mat3_identity;
     _sgp.state.mvp = _sgp.state.proj;
-    _sgp.state.color = (sgp_color){1.0f, 1.0f, 1.0f, 1.0f};
-    _sgp.state.uniform = (sgp_uniform){.size=sizeof(sgp_color), .content={1.0f,1.0f,1.0f,1.0f}};
+    _sgp.state.color = (sgp_color){255, 255, 255, 255};
+    _sgp.state.uniform = (sgp_uniform){.size=0};
     _sgp.state.blend_mode = SGP_BLENDMODE_NONE;
     _sgp.state._base_vertex = _sgp.cur_vertex;
     _sgp.state._base_uniform = _sgp.cur_uniform;
@@ -920,10 +923,9 @@ void sgp_commit() {
         return;
     }
 
-    const uint32_t SG_IMPOSSIBLE_ID = 0xffffffffU;
-    uint32_t cur_pip_id = SG_IMPOSSIBLE_ID;
-    uint32_t cur_img_id = SG_IMPOSSIBLE_ID;
-    uint32_t cur_uniform_index = SG_IMPOSSIBLE_ID;
+    uint32_t cur_pip_id = _SGP_IMPOSSIBLE_ID;
+    uint32_t cur_img_id = _SGP_IMPOSSIBLE_ID;
+    uint32_t cur_uniform_index = _SGP_IMPOSSIBLE_ID;
     uint32_t cur_base_vertex = 0;
 
     // define the resource bindings
@@ -952,8 +954,8 @@ void sgp_commit() {
                     break;
                 if(args->pip.id != cur_pip_id) {
                     // when pipeline changes, also need to re-apply uniforms and bindings
-                    cur_img_id = SG_IMPOSSIBLE_ID;
-                    cur_uniform_index = SG_IMPOSSIBLE_ID;
+                    cur_img_id = _SGP_IMPOSSIBLE_ID;
+                    cur_uniform_index = _SGP_IMPOSSIBLE_ID;
                     cur_pip_id = args->pip.id;
                     sg_apply_pipeline(args->pip);
                 }
@@ -965,9 +967,11 @@ void sgp_commit() {
                 }
                 if(cur_uniform_index != args->uniform_index) {
                     cur_uniform_index = args->uniform_index;
-                    sgp_uniform* uniform = &_sgp.uniforms[cur_uniform_index];
-                    if(uniform->size > 0)
-                        sg_apply_uniforms(SG_SHADERSTAGE_FS, 0, &uniform->content, uniform->size);
+                    if(args->uniform_index != _SGP_IMPOSSIBLE_ID) {
+                        sgp_uniform* uniform = &_sgp.uniforms[cur_uniform_index];
+                        if(uniform->size > 0)
+                            sg_apply_uniforms(SG_SHADERSTAGE_FS, 0, &uniform->content, uniform->size);
+                    }
                 }
                 sg_draw(args->vertex_index - cur_base_vertex, args->num_vertices, 1);
                 break;
@@ -1135,15 +1139,8 @@ void sgp_set_pipeline(sg_pipeline pipeline) {
     SOKOL_ASSERT(_sgp.init_cookie == _SGP_INIT_COOKIE);
     _sgp.state.pipeline = pipeline;
 
-    // restore uniform for the default pipeline
-    if(pipeline.id == SG_INVALID_ID) {
-        _sgp.state.uniform = (sgp_uniform){
-            .size=sizeof(sgp_color),
-            .content={_sgp.state.color.r,_sgp.state.color.g,_sgp.state.color.b,_sgp.state.color.a}
-        };
-    } else {
-        memset(&_sgp.state.uniform, 0, sizeof(sgp_uniform));
-    }
+    // reset uniform
+    memset(&_sgp.state.uniform, 0, sizeof(sgp_uniform));
 }
 
 void sgp_reset_pipeline() {
@@ -1181,20 +1178,18 @@ void sgp_reset_blend_mode() {
 void sgp_set_color(float r, float g, float b, float a) {
     SOKOL_ASSERT(_sgp.init_cookie == _SGP_INIT_COOKIE);
     SOKOL_ASSERT(_sgp.cur_state > 0);
-    _sgp.state.color = (sgp_color){r,g,b,a};
-
-    // update uniform for the default pipeline
-    if(_sgp.state.pipeline.id == SG_INVALID_ID) {
-        _sgp.state.uniform = (sgp_uniform){
-            .size=sizeof(sgp_color),
-            .content={_sgp.state.color.r,_sgp.state.color.g,_sgp.state.color.b,_sgp.state.color.a}
-        };
-    }
+    _sgp.state.color = (sgp_color){
+        _sg_clamp(r*255, 0, 255),
+        _sg_clamp(g*255, 0, 255),
+        _sg_clamp(b*255, 0, 255),
+        _sg_clamp(a*255, 0, 255)
+    };
 }
 
 void sgp_reset_color() {
     SOKOL_ASSERT(_sgp.init_cookie == _SGP_INIT_COOKIE);
-    sgp_set_color(1.0f, 1.0f, 1.0f, 1.0f);
+    SOKOL_ASSERT(_sgp.cur_state > 0);
+    _sgp.state.color = (sgp_color){255,255,255,255};
 }
 
 static _sgp_vertex* _sgp_next_vertices(uint32_t count) {
@@ -1335,7 +1330,7 @@ static inline bool _sgp_region_overlaps(_sgp_region a, _sgp_region b) {
     return !(a.x2 <= b.x1 || b.x2 <= a.x1  || a.y2 <= b.y1 || b.y2 <= a.y1);
 }
 
-static bool _sgp_merge_batch_command(sg_pipeline pip, sg_image img, sgp_uniform uniform, _sgp_region region, uint32_t vertex_index, uint32_t num_vertices) {
+static bool _sgp_merge_batch_command(sg_pipeline pip, sg_image img, sgp_uniform* uniform, _sgp_region region, uint32_t vertex_index, uint32_t num_vertices) {
     _sgp_command* inter_cmds[SGP_BATCH_OPTIMIZER_DEPTH];
     _sgp_command* prev_cmd = NULL;
     uint32_t inter_cmd_count = 0;
@@ -1361,7 +1356,7 @@ static bool _sgp_merge_batch_command(sg_pipeline pip, sg_image img, sgp_uniform 
         // can only batch commands with the same bindings and uniforms
         if(cmd->args.draw.pip.id == pip.id &&
            cmd->args.draw.img.id == img.id &&
-           _sgp_uniform_equals(&uniform, &_sgp.uniforms[cmd->args.draw.uniform_index])) {
+           (!uniform || _sgp_uniform_equals(uniform, &_sgp.uniforms[cmd->args.draw.uniform_index]))) {
             prev_cmd = cmd;
             break;
         } else {
@@ -1458,26 +1453,32 @@ static bool _sgp_merge_batch_command(sg_pipeline pip, sg_image img, sgp_uniform 
 
 static void _sgp_queue_draw(sg_pipeline pip, sg_image img, _sgp_region region, uint32_t vertex_index, uint32_t num_vertices) {
     // override pipeline
-    if(_sgp.state.pipeline.id != SG_INVALID_ID)
+    sgp_uniform* uniform = NULL;
+    if(_sgp.state.pipeline.id != SG_INVALID_ID) {
         pip = _sgp.state.pipeline;
+        uniform = &_sgp.state.uniform;
+    }
 
-    if(pip.id == SG_INVALID_ID)
+    if(SOKOL_UNLIKELY(pip.id == SG_INVALID_ID))
         return;
 
     // try to merge on previous command to draw in a batch
-    if(_sgp_merge_batch_command(pip, img, _sgp.state.uniform, region, vertex_index, num_vertices))
+    if(_sgp_merge_batch_command(pip, img, uniform, region, vertex_index, num_vertices))
         return;
 
-    // setup uniform, try to reuse previous uniform when possible
-    sgp_uniform *prev_uniform = _sgp_prev_uniform();
-    bool reuse_uniform = prev_uniform && _sgp_uniform_equals(prev_uniform, &_sgp.state.uniform);
-    if(!reuse_uniform) {
-        // append new uniform
-        sgp_uniform *next_uniform = _sgp_next_uniform();
-        if(SOKOL_UNLIKELY(!next_uniform)) return;
-        *next_uniform = _sgp.state.uniform;
+    // try to reuse previous uniform when possible
+    uint32_t uniform_index = _SGP_IMPOSSIBLE_ID;
+    if(uniform) {
+        sgp_uniform *prev_uniform = _sgp_prev_uniform();
+        bool reuse_uniform = prev_uniform && _sgp_uniform_equals(prev_uniform, uniform);
+        if(!reuse_uniform) {
+            // append new uniform
+            sgp_uniform *next_uniform = _sgp_next_uniform();
+            if(SOKOL_UNLIKELY(!next_uniform)) return;
+            *next_uniform = *uniform;
+        }
+        uniform_index = _sgp.cur_uniform - 1;
     }
-    uint32_t uniform_index = _sgp.cur_uniform - 1;
 
     // append new draw command
     _sgp_command* cmd = _sgp_next_command();
@@ -1507,10 +1508,11 @@ static void _sgp_transform_vec2(sgp_mat3* matrix, sgp_vec2* dst, const sgp_vec2 
 
 static void _sgp_draw_solid_pip(sg_pipeline pip, const sgp_vec2* vertices, uint32_t num_vertices) {
     uint32_t vertex_index = _sgp.cur_vertex;
-    _sgp_vertex* transformed_vertices = _sgp_next_vertices(num_vertices);
+    _sgp_vertex* v = _sgp_next_vertices(num_vertices);
     if(SOKOL_UNLIKELY(!vertices)) return;
 
-    sgp_mat3 mvp = _sgp.state.mvp; // copy to stack for more efficiency
+    sgp_mat3 mvp = _sgp.state.mvp;
+    sgp_color color = _sgp.state.color;
     _sgp_region region = {.x1=1.0f, .y1=1.0f, .x2=-1.0f, .y2=-1.0f};
     for(uint32_t i=0;i<num_vertices;++i) {
         sgp_vec2 p = _sgp_mat3_vec2_mul(&mvp, &vertices[i]);
@@ -1518,9 +1520,10 @@ static void _sgp_draw_solid_pip(sg_pipeline pip, const sgp_vec2* vertices, uint3
         region.y1 = _sg_min(region.y1, p.y);
         region.x2 = _sg_max(region.x2, p.x);
         region.y2 = _sg_max(region.y2, p.y);
-        transformed_vertices[i] = (_sgp_vertex) {
+        v[i] = (_sgp_vertex) {
             .position = p,
-            .texcoord = {0.0f, 0.0f}
+            .texcoord = {0.0f, 0.0f},
+            .color = color,
         };
     }
     _sgp_queue_draw(pip, _sgp.white_img, region, vertex_index, num_vertices);
@@ -1547,12 +1550,13 @@ void sgp_clear() {
     const sgp_vec2 texcoord = {0.0f, 0.0f};
 
     // make a quad composed of 2 triangles
-    v[0].position = quad[0]; v[0].texcoord = texcoord;
-    v[1].position = quad[1]; v[1].texcoord = texcoord;
-    v[2].position = quad[2]; v[2].texcoord = texcoord;
-    v[3].position = quad[3]; v[3].texcoord = texcoord;
-    v[4].position = quad[0]; v[4].texcoord = texcoord;
-    v[5].position = quad[2]; v[5].texcoord = texcoord;
+    sgp_color color = _sgp.state.color;
+    v[0].position = quad[0]; v[0].texcoord = texcoord; v[0].color = color;
+    v[1].position = quad[1]; v[1].texcoord = texcoord; v[1].color = color;
+    v[2].position = quad[2]; v[2].texcoord = texcoord; v[2].color = color;
+    v[3].position = quad[3]; v[3].texcoord = texcoord; v[3].color = color;
+    v[4].position = quad[0]; v[4].texcoord = texcoord; v[4].color = color;
+    v[5].position = quad[2]; v[5].texcoord = texcoord; v[5].color = color;
 
     _sgp_region region = {.x1=-1.0f, .y1=-1.0f, .x2=1.0f, .y2=1.0f};
 
@@ -1635,7 +1639,8 @@ void sgp_draw_filled_rects(const sgp_rect* rects, uint32_t count) {
     // compute vertices
     _sgp_vertex* v = vertices;
     const sgp_rect* rect = rects;
-    sgp_mat3 mvp = _sgp.state.mvp; // copy to stack for more efficiency
+    sgp_mat3 mvp = _sgp.state.mvp;
+    sgp_color color = _sgp.state.color;
     _sgp_region region = {.x1=1.0f, .y1=1.0f, .x2=-1.0f, .y2=-1.0f};
     for(uint32_t i=0;i<count;v+=6, rect++, i++) {
         sgp_vec2 quad[4] = {
@@ -1661,12 +1666,12 @@ void sgp_draw_filled_rects(const sgp_rect* rects, uint32_t count) {
         };
 
         // make a quad composed of 2 triangles
-        v[0].position = quad[0]; v[0].texcoord = vtexquad[0];
-        v[1].position = quad[1]; v[1].texcoord = vtexquad[1];
-        v[2].position = quad[2]; v[2].texcoord = vtexquad[2];
-        v[3].position = quad[3]; v[3].texcoord = vtexquad[3];
-        v[4].position = quad[0]; v[4].texcoord = vtexquad[0];
-        v[5].position = quad[2]; v[5].texcoord = vtexquad[2];
+        v[0].position = quad[0]; v[0].texcoord = vtexquad[0]; v[0].color = color;
+        v[1].position = quad[1]; v[1].texcoord = vtexquad[1]; v[1].color = color;
+        v[2].position = quad[2]; v[2].texcoord = vtexquad[2]; v[2].color = color;
+        v[3].position = quad[3]; v[3].texcoord = vtexquad[3]; v[3].color = color;
+        v[4].position = quad[0]; v[4].texcoord = vtexquad[0]; v[4].color = color;
+        v[5].position = quad[2]; v[5].texcoord = vtexquad[2]; v[5].color = color;
     }
 
     sg_pipeline pip = _sgp_lookup_pipeline(SG_PRIMITIVETYPE_TRIANGLES, _sgp.state.blend_mode);
@@ -1692,7 +1697,8 @@ void sgp_draw_textured_rects(sg_image image, const sgp_rect* rects, uint32_t cou
     if(SOKOL_UNLIKELY(!vertices)) return;
 
     // compute vertices
-    sgp_mat3 mvp = _sgp.state.mvp; // copy to stack for more efficiency
+    sgp_mat3 mvp = _sgp.state.mvp;
+    sgp_color color = _sgp.state.color;
     _sgp_region region = {.x1=1.0f, .y1=1.0f, .x2=-1.0f, .y2=-1.0f};
     for(uint32_t i=0;i<count;i++) {
         sgp_vec2 quad[4] = {
@@ -1719,12 +1725,12 @@ void sgp_draw_textured_rects(sg_image image, const sgp_rect* rects, uint32_t cou
 
         // make a quad composed of 2 triangles
         _sgp_vertex* v = &vertices[i*6];
-        v[0].position = quad[0]; v[0].texcoord = vtexquad[0];
-        v[1].position = quad[1]; v[1].texcoord = vtexquad[1];
-        v[2].position = quad[2]; v[2].texcoord = vtexquad[2];
-        v[3].position = quad[3]; v[3].texcoord = vtexquad[3];
-        v[4].position = quad[0]; v[4].texcoord = vtexquad[0];
-        v[5].position = quad[2]; v[5].texcoord = vtexquad[2];
+        v[0].position = quad[0]; v[0].texcoord = vtexquad[0]; v[0].color = color;
+        v[1].position = quad[1]; v[1].texcoord = vtexquad[1]; v[1].color = color;
+        v[2].position = quad[2]; v[2].texcoord = vtexquad[2]; v[2].color = color;
+        v[3].position = quad[3]; v[3].texcoord = vtexquad[3]; v[3].color = color;
+        v[4].position = quad[0]; v[4].texcoord = vtexquad[0]; v[4].color = color;
+        v[5].position = quad[2]; v[5].texcoord = vtexquad[2]; v[5].color = color;
     }
 
     sg_pipeline pip = _sgp_lookup_pipeline(SG_PRIMITIVETYPE_TRIANGLES, _sgp.state.blend_mode);
@@ -1760,7 +1766,7 @@ void sgp_draw_textured_rects_ex(sg_image image, const sgp_textured_rect* rects, 
     float iw = 1.0f/image_size.w, ih = 1.0f/image_size.h;
 
     // compute vertices
-    sgp_mat3 mvp = _sgp.state.mvp; // copy to stack for more efficiency
+    sgp_mat3 mvp = _sgp.state.mvp;
     _sgp_region region = {.x1=1.0f, .y1=1.0f, .x2=-1.0f, .y2=-1.0f};
     for(uint32_t i=0;i<count;i++) {
         sgp_vec2 quad[4] = {
@@ -1788,6 +1794,7 @@ void sgp_draw_textured_rects_ex(sg_image image, const sgp_textured_rect* rects, 
     }
 
     // compute texture coords
+    sgp_color color = _sgp.state.color;
     for(uint32_t i=0;i<count;i++) {
         // compute source rect
         float tl = rects[i].src.x*iw;
@@ -1803,12 +1810,12 @@ void sgp_draw_textured_rects_ex(sg_image image, const sgp_textured_rect* rects, 
 
         // make a quad composed of 2 triangles
         _sgp_vertex* v = &vertices[i*6];
-        v[0].texcoord = vtexquad[0];
-        v[1].texcoord = vtexquad[1];
-        v[2].texcoord = vtexquad[2];
-        v[3].texcoord = vtexquad[3];
-        v[4].texcoord = vtexquad[0];
-        v[5].texcoord = vtexquad[2];
+        v[0].texcoord = vtexquad[0]; v[0].color = color;
+        v[1].texcoord = vtexquad[1]; v[1].color = color;
+        v[2].texcoord = vtexquad[2]; v[2].color = color;
+        v[3].texcoord = vtexquad[3]; v[3].color = color;
+        v[4].texcoord = vtexquad[0]; v[4].color = color;
+        v[5].texcoord = vtexquad[2]; v[5].color = color;
     }
 
     sg_pipeline pip = _sgp_lookup_pipeline(SG_PRIMITIVETYPE_TRIANGLES, _sgp.state.blend_mode);

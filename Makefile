@@ -14,9 +14,11 @@ ifeq ($(platform), windows)
 	CC:=x86_64-w64-mingw32-gcc
 	DEFINES+=-DSDL_MAIN_HANDLED
 	LIBS+=-lSDL2main -lopengl32 -ld3d11 -ldxgi -ldxguid
+	OUTEXT=.exe
 else
 	CC?=gcc
 	LIBS+=-lGL -ldl
+	OUTEXT=
 endif
 
 # build type
@@ -48,8 +50,6 @@ else ifeq ($(backend), dummy)
 	DEFINES+=-DSOKOL_DUMMY_BACKEND
 endif
 
-DEPS=sokol_gctx.h sokol_gfx.h sokol_gfx_ext.h sokol_gp.h flextgl.h samples/sample_app.h Makefile
-
 .PHONY: all clean shaders
 
 all: sample-prims sample-blend sample-capture sample-fb sample-bench sample-sdf
@@ -61,26 +61,10 @@ shaders:
 	@mkdir -p $(OUTDIR)
 	$(SHDC) -i sokol_gp_shaders.glsl -o $(OUTDIR)/sokol_gp_shaders.glsl.h -l $(SHDCLANGS)
 
-ifeq ($(platform), windows)
-
-OUTEXT=.exe
-
-$(OUTDIR)/%$(OUTEXT): $(DEPS) samples/%.c
+%:
 	@mkdir -p $(OUTDIR)
-	$(CC) -o $@ $(subst $(OUTEXT),.c,$(subst $(OUTDIR),samples,$@)) $(INCLUDES) $(DEFINES) $(CFLAGS) $(LIBS)
-
-else
-
-OUTEXT=
-
-$(OUTDIR)/%: $(DEPS) samples/%.c samples/%.glsl.h
-	@mkdir -p $(OUTDIR)
-	$(CC) -o $@ $(subst $(OUTDIR),samples,$@).c $(INCLUDES) $(DEFINES) $(CFLAGS) $(LIBS)
-
-endif
+	$(CC) -o $(OUTDIR)/$@$(OUTEXT) samples/$@.c $(INCLUDES) $(DEFINES) $(CFLAGS) $(LIBS)
 
 samples/sample-sdf.glsl.h: samples/sample-sdf.glsl
 	$(SHDC) -i samples/sample-sdf.glsl -o samples/sample-sdf.glsl.h -l $(SHDCLANGS)
 
-%:
-	@${MAKE} --no-print-directory $(OUTDIR)/$@$(OUTEXT)
