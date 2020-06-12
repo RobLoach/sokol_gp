@@ -148,7 +148,7 @@ int sample_app_main(const sample_app_desc* app_desc) {
             .stencil = {.action = SG_ACTION_DONTCARE},
         };
         sg_begin_default_pass(&default_pass_action, size.w, size.h);
-        sgp_flush();
+        sgp_commit();
         sg_end_pass();
         sgp_end();
         sg_commit();

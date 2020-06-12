@@ -55,7 +55,7 @@ void draw_fbo() {
         .stencil = {.action = SG_ACTION_DONTCARE},
     };
     sg_begin_pass(fb_pass, &pass_action);
-    sgp_flush();
+    sgp_commit();
 
     if(fb_captured_image2.id != SG_INVALID_ID)
         sg_destroy_image(fb_captured_image2);

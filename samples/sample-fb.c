@@ -34,7 +34,7 @@ void draw_fbo() {
         .stencil = {.action = SG_ACTION_DONTCARE},
     };
     sg_begin_pass(fb_pass, &pass_action);
-    sgp_flush();
+    sgp_commit();
     sgp_end();
     sg_end_pass();
 }

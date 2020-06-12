@@ -144,7 +144,7 @@ SOKOL_API_DECL sg_pipeline sgp_make_pipeline(const sgp_pipeline_desc* desc);
 
 // rendering functions
 SOKOL_API_DECL void sgp_begin(int width, int height);
-SOKOL_API_DECL void sgp_flush();
+SOKOL_API_DECL void sgp_commit();
 SOKOL_API_DECL void sgp_end();
 
 // state projection functions
@@ -891,7 +891,7 @@ void sgp_begin(int width, int height) {
     _sgp.state._base_command = _sgp.cur_command;
 }
 
-void sgp_flush() {
+void sgp_commit() {
     SOKOL_ASSERT(_sgp.init_cookie == _SGP_INIT_COOKIE);
     SOKOL_ASSERT(_sgp.cur_state > 0);
 
@@ -1323,6 +1323,8 @@ void sgp_reset_state() {
     sgp_reset_transform();
     sgp_reset_blend_mode();
     sgp_reset_color();
+    sgp_reset_uniform();
+    sgp_reset_pipeline();
 }
 
 static inline bool _sgp_uniform_equals(sgp_uniform* a, sgp_uniform* b) {
